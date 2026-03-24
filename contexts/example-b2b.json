@@ -1,0 +1,86 @@
+{
+  "business_name": "Avolution Tech",
+  "url": "https://avolution.tech",
+  "property_id": "987654321",
+  "description": "B2B technology consultancy offering digital transformation, cloud migration, and custom software development",
+  "business_type": "b2b_services",
+  "target_audience": "CTOs and IT directors at mid-market companies (50-500 employees)",
+  "markets": "UK and Western Europe",
+  "contact": { "name": "Head of Marketing", "email": "marketing@avolution.tech" },
+
+  "goals": {
+    "primary_goals": "Qualified lead generation, brand authority in cloud migration",
+    "has_targets": true,
+    "key_metric": "Marketing Qualified Leads (MQLs) per month",
+    "growth_target": "20 MQLs/month by Q2 2026"
+  },
+
+  "funnel": {
+    "active_channels": ["Organic Search", "LinkedIn Ads", "Email", "Referrals"],
+    "priority_channel": "Organic Search",
+    "best_channel": "Referrals (highest close rate)",
+    "needs_improvement": "LinkedIn Ads (high CPC, low conversion)",
+    "channel_manager": "In-house marketing team (2 people)",
+    "conversion_rate": "3.5% (visit to form submission)",
+    "average_order_value": ""
+  },
+
+  "products": {
+    "priority_products": "Cloud migration services, DevOps consulting",
+    "competitive_advantages": "Deep AWS expertise, UK-based team, case studies with measurable ROI",
+    "seo_keywords": ["cloud migration services UK", "DevOps consulting", "digital transformation", "AWS migration partner"],
+    "ad_notes": "LinkedIn Ads targeting CTO/VP Engineering titles. Budget: 2000 GBP/month."
+  },
+
+  "seasonality": {
+    "description": "B2B cycle: budget planning in Q4 drives Q1 inquiries. Summer slowdown July-August.",
+    "peak_months": ["January", "February", "September", "October"],
+    "low_months": ["July", "August", "December"]
+  },
+
+  "competitors": [
+    { "name": "Kinly", "url": "https://kinly.com" },
+    { "name": "Rackspace", "url": "https://rackspace.com" },
+    { "name": "Cloudreach", "url": "https://cloudreach.com" }
+  ],
+
+  "gaps": {
+    "offline_steps": true,
+    "budget_method": "Fixed monthly with quarterly review",
+    "specific_problem": "Blog traffic growing but not converting to leads — content-to-conversion gap",
+    "ai_monitoring": "Monthly reporting",
+    "additional_notes": "Sales cycle is 3-6 months. Website form submissions are only the first step — followed by discovery call, proposal, negotiation."
+  },
+
+  "enrichment": {
+    "client_site": {
+      "platform": "WordPress",
+      "gtm_id": "GTM-YYYYYYY",
+      "ga4_id": "G-YYYYYYYYYY",
+      "meta_pixel": false,
+      "consent_banner": "CookieYes",
+      "navigation_sections": ["Services", "Case Studies", "Blog", "About", "Contact"],
+      "value_propositions": ["AWS Advanced Partner", "UK-Based Team", "Proven ROI"],
+      "detected_services": ["Google Ads", "LinkedIn Insight Tag", "HubSpot", "Calendly"]
+    },
+    "competitors": [
+      {
+        "name": "Kinly",
+        "url": "https://kinly.com",
+        "platform": "Custom",
+        "tracking": ["GA4", "LinkedIn Insight"],
+        "notes": "Larger company, broader service offering, stronger brand presence"
+      }
+    ],
+    "enriched_at": "2026-03-15"
+  },
+
+  "what_changed": {
+    "campaign_changes": "New LinkedIn campaign targeting financial services CTOs launched March 10. Paused generic 'cloud services' Google Ads campaign (low quality leads).",
+    "site_changes": "Published 3 new case studies in March. Redesigned services page with clearer CTAs. Added Calendly integration for discovery calls.",
+    "technical_changes": "Added scroll_depth and form_interaction custom events. LinkedIn Insight tag updated to new version.",
+    "external_factors": "AWS re:Invent announcements driving increased search interest in cloud migration."
+  },
+
+  "last_updated": "2026-03-15"
+}

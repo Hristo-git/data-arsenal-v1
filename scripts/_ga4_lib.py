@@ -9,6 +9,41 @@ import json
 import time
 from datetime import date, timedelta
 
+# --- Venv auto-activation ---
+# If a venv exists alongside the scripts, activate it so google packages are found
+# regardless of which python3 the shebang resolved to.
+_config_dir = os.path.expanduser('~/.config/data-arsenal')
+_venv_site = os.path.join(_config_dir, 'venv', 'lib')
+_venv_site_win = os.path.join(_config_dir, 'venv', 'Lib', 'site-packages')
+if os.path.isdir(_venv_site_win) and _venv_site_win not in sys.path:
+    # Windows: venv/Lib/site-packages (flat)
+    sys.path.insert(0, _venv_site_win)
+elif os.path.isdir(_venv_site):
+    # macOS/Linux: venv/lib/python3.X/site-packages
+    for _d in os.listdir(_venv_site):
+        _sp = os.path.join(_venv_site, _d, 'site-packages')
+        if os.path.isdir(_sp) and _sp not in sys.path:
+            sys.path.insert(0, _sp)
+            break
+
+# Try to import Google API packages (optional for cloud mode)
+_HAS_GOOGLE = False
+try:
+    import google.auth
+    _HAS_GOOGLE = True
+except ImportError:
+    pass
+
+
+def _require_google():
+    """Exit with helpful message if Google packages aren't installed."""
+    if not _HAS_GOOGLE:
+        print("ERROR: Google API packages not installed.", file=sys.stderr)
+        print("Fix: Re-run setup to install dependencies:", file=sys.stderr)
+        print("  python3 ~/.config/data-arsenal/scripts/ga4-setup", file=sys.stderr)
+        print("  OR: pip install google-auth google-auth-oauthlib google-api-python-client", file=sys.stderr)
+        sys.exit(1)
+
 # Constants
 CONFIG_DIR = os.path.expanduser('~/.config/data-arsenal')
 CREDENTIALS_FILE = os.path.join(CONFIG_DIR, 'credentials.json')
@@ -33,6 +68,7 @@ BUNDLED_CLIENT_CONFIG = {
 
 def authenticate():
     """Run OAuth flow, save credentials. Returns Credentials object."""
+    _require_google()
     from google_auth_oauthlib.flow import InstalledAppFlow
 
     os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -45,6 +81,7 @@ def authenticate():
 
 def load_credentials():
     """Load credentials from JSON, auto-refresh if expired. Returns Credentials or None."""
+    _require_google()
     if not os.path.exists(CREDENTIALS_FILE):
         return None
 
@@ -337,3 +374,95 @@ def get_date_ranges(days=7):
         {'startDate': start.strftime('%Y-%m-%d'), 'endDate': end.strftime('%Y-%m-%d')},
         {'startDate': prev_start.strftime('%Y-%m-%d'), 'endDate': prev_end.strftime('%Y-%m-%d')}
     ], start, end, prev_start, prev_end
+
+
+# --- Config ---
+
+def load_config():
+    """Load config.json, return dict."""
+    config_path = os.path.join(CONFIG_DIR, 'config.json')
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            return json.load(f)
+    return {}
+
+
+def save_config(config):
+    """Save config dict to config.json."""
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    config_path = os.path.join(CONFIG_DIR, 'config.json')
+    with open(config_path, 'w') as f:
+        json.dump(config, f, indent=2)
+
+
+# --- Cloud Mode (dataarsenal.com API) ---
+
+CLOUD_API_URL = 'https://audit.dataarsenal.com'
+
+
+def _cloud_request(api_key, method, path, body=None):
+    """Make HTTP request to dataarsenal.com API. Returns parsed JSON."""
+    import urllib.request
+    import urllib.error
+
+    url = CLOUD_API_URL + path
+    headers = {
+        'Authorization': f'Bearer {api_key}',
+        'Content-Type': 'application/json',
+    }
+
+    data = json.dumps(body).encode('utf-8') if body else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        try:
+            err = json.loads(e.read().decode('utf-8'))
+            msg = err.get('error', {})
+            if isinstance(msg, dict):
+                msg = f"{msg.get('code', 'ERROR')}: {msg.get('message', 'Unknown error')}"
+            print(f"API error: {msg}", file=sys.stderr)
+        except Exception:
+            print(f"API error: HTTP {e.code}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"Connection error: {e.reason}", file=sys.stderr)
+        print("Check your internet connection and try again.", file=sys.stderr)
+        sys.exit(1)
+
+
+def cloud_audit(api_key, property_id, ecommerce='auto', fmt='markdown'):
+    """Call dataarsenal.com audit API. Returns (property_name, markdown_or_json, score, raw_data)."""
+    prop = property_id if property_id.startswith('properties/') else f'properties/{property_id}'
+    body = {
+        'property_id': prop,
+        'format': fmt,
+        'has_ecommerce': ecommerce,
+    }
+    result = _cloud_request(api_key, 'POST', '/api/v1/audit', body)
+    data = result.get('data', {})
+    return (
+        data.get('property_name', property_id),
+        data.get('markdown', '') if fmt == 'markdown' else data,
+        data.get('health_score', 0),
+        data
+    )
+
+
+def cloud_list_properties(api_key):
+    """List properties via dataarsenal.com API. Returns list of dicts."""
+    result = _cloud_request(api_key, 'POST', '/api/v1/properties', {})
+    data = result.get('data', {})
+    props = data.get('properties', [])
+    return [{'property_id': p.get('id', ''), 'display_name': p.get('display_name', '')} for p in props]
+
+
+def cloud_verify(api_key):
+    """Verify API key works by listing properties. Returns True/False."""
+    try:
+        props = cloud_list_properties(api_key)
+        return len(props) >= 0  # Even empty list means auth works
+    except SystemExit:
+        return False

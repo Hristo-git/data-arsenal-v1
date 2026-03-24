@@ -66,4 +66,20 @@ Fill in what you know. Skip what you don't. Partial context is infinitely better
 
 ---
 
+## Enrichment (auto-detected from website)
+
+### Client Site
+- Platform: ___
+- Navigation sections: ___
+- Value propositions: ___
+- Detected services/tools: ___
+
+### Competitors (auto-researched)
+- Competitor 1: ___ (platform: ___)
+- Competitor 2: ___ (platform: ___)
+
+Enriched at: ___
+
+---
+
 Last updated: ___

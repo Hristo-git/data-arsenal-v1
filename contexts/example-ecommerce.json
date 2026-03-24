@@ -1,0 +1,93 @@
+{
+  "business_name": "Example Store",
+  "url": "https://example-store.com",
+  "property_id": "123456789",
+  "description": "Online retailer specializing in home electronics and lifestyle products",
+  "business_type": "ecommerce",
+  "target_audience": "Tech-savvy consumers aged 25-45, urban professionals",
+  "markets": "Bulgaria, primarily Sofia metropolitan area",
+  "contact": { "name": "Marketing Team", "email": "marketing@example-store.com" },
+
+  "goals": {
+    "primary_goals": "Revenue growth, new customer acquisition",
+    "has_targets": true,
+    "key_metric": "Revenue per session",
+    "growth_target": "15% vs last year"
+  },
+
+  "funnel": {
+    "active_channels": ["Google Ads", "Organic Search", "Meta Ads", "Email"],
+    "priority_channel": "Google Ads",
+    "best_channel": "Google Ads (40% of revenue)",
+    "needs_improvement": "Organic Search (high potential, underperforming)",
+    "channel_manager": "In-house team + agency for Google Ads",
+    "conversion_rate": "2.3%",
+    "average_order_value": "85 EUR"
+  },
+
+  "products": {
+    "priority_products": "Home electronics (45% of revenue)",
+    "competitive_advantages": "Curated selection with expert reviews, same-day shipping in Sofia",
+    "seo_keywords": ["home electronics", "smart home devices", "wireless speakers", "robot vacuum"],
+    "ad_notes": "Google Shopping for spring collection launched March 5. Brand keyword bids +20% since March 7."
+  },
+
+  "seasonality": {
+    "description": "Strong Q4 driven by Black Friday and Christmas. Summer sale in July provides mid-year boost.",
+    "peak_months": ["November", "December"],
+    "low_months": ["January", "February"]
+  },
+
+  "competitors": [
+    { "name": "Competitor A", "url": "https://competitor-a.com" },
+    { "name": "Competitor B", "url": "https://competitor-b.com" },
+    { "name": "Competitor C", "url": "https://competitor-c.com" }
+  ],
+
+  "gaps": {
+    "offline_steps": false,
+    "budget_method": "Monthly budget with quarterly reviews, reallocated based on ROAS",
+    "specific_problem": "Cart abandonment at 60% — checkout friction suspected",
+    "ai_monitoring": "Weekly what-changed reports",
+    "additional_notes": "8 products out of stock in home electronics due to supplier delay"
+  },
+
+  "enrichment": {
+    "client_site": {
+      "platform": "WooCommerce",
+      "gtm_id": "GTM-XXXXXXX",
+      "ga4_id": "G-XXXXXXXXXX",
+      "meta_pixel": true,
+      "consent_banner": "CookieBot",
+      "navigation_sections": ["Home Electronics", "Kitchen", "Garden", "Smart Home", "Deals"],
+      "value_propositions": ["Expert Reviews", "Same-Day Shipping", "30-Day Returns"],
+      "detected_services": ["Google Ads", "Meta Ads", "Mailchimp", "Hotjar"]
+    },
+    "competitors": [
+      {
+        "name": "Competitor A",
+        "url": "https://competitor-a.com",
+        "platform": "Shopify",
+        "tracking": ["GA4", "Meta Pixel", "TikTok Pixel"],
+        "notes": "Stronger brand, higher prices, better mobile experience"
+      },
+      {
+        "name": "Competitor B",
+        "url": "https://competitor-b.com",
+        "platform": "Custom",
+        "tracking": ["GA4", "Meta Pixel"],
+        "notes": "Lower prices, wider catalog, launched spring sale March 3"
+      }
+    ],
+    "enriched_at": "2026-03-10"
+  },
+
+  "what_changed": {
+    "campaign_changes": "Paused Meta retargeting March 3 (budget to Google). New Google Shopping campaign for spring collection March 5. Brand keyword bids +20% March 7.",
+    "site_changes": "New 2-step checkout deployed March 1. Product comparison feature added to category pages. 8 home electronics products out of stock.",
+    "technical_changes": "Consent Mode v2 updated March 2. New event: product_comparison_click added March 4. Fixed duplicate purchase event on order confirmation page.",
+    "external_factors": "Competitor B spring sale campaign launched March 3. Industry report: 12% growth in online home electronics."
+  },
+
+  "last_updated": "2026-03-10"
+}

@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
 Data Arsenal v1 - Built-in Health Checks
-10 checks using GA4 Data API only (analytics.readonly scope).
+20 checks using GA4 Data API only (analytics.readonly scope).
 """
 
 import argparse
 import json
 import os
+import platform
+import re
+import subprocess
 import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -14,12 +17,14 @@ sys.path.insert(0, SCRIPT_DIR)
 
 from _ga4_lib import (
     require_credentials, get_data_service, get_property_name,
-    build_query, run_report, parse_rows, resolve_property
+    build_query, run_report, parse_rows, resolve_property,
+    load_config, cloud_audit
 )
+from _translations import get_translator
 
 
 def fetch_audit_data(service, property_id):
-    """Fetch all data needed for health checks in 4 API calls."""
+    """Fetch all data needed for health checks in 8 API calls."""
     from datetime import date, timedelta
 
     end = date.today()
@@ -60,13 +65,15 @@ def fetch_audit_data(service, property_id):
     print("  Fetching sources...", file=sys.stderr)
     body = build_query(
         date_ranges=date_range,
-        metrics=['sessions', 'bounceRate'],
+        metrics=['sessions', 'bounceRate', 'totalRevenue', 'ecommercePurchases',
+                 'engagedSessions', 'averageSessionDuration'],
         dimensions=['sessionSourceMedium'],
         limit=500,
         order_bys=[{'metric': {'metricName': 'sessions'}, 'desc': True}]
     )
     resp = run_report(service, property_id, body)
-    data['sources'] = parse_rows(resp, ['sessions', 'bounceRate'],
+    data['sources'] = parse_rows(resp, ['sessions', 'bounceRate', 'totalRevenue', 'ecommercePurchases',
+                                        'engagedSessions', 'averageSessionDuration'],
                                   dimensions=['sessionSourceMedium'])
 
     # 4. Landing pages (30d)
@@ -82,10 +89,68 @@ def fetch_audit_data(service, property_id):
     data['landing_pages'] = parse_rows(resp, ['sessions', 'bounceRate'],
                                         dimensions=['landingPagePlusQueryString'])
 
+    # 5. Channels (30d)
+    print("  Fetching channels...", file=sys.stderr)
+    body = build_query(
+        date_ranges=date_range,
+        metrics=['sessions', 'engagementRate'],
+        dimensions=['sessionDefaultChannelGroup'],
+        limit=500,
+        order_bys=[{'metric': {'metricName': 'sessions'}, 'desc': True}]
+    )
+    resp = run_report(service, property_id, body)
+    data['channels'] = parse_rows(resp, ['sessions', 'engagementRate'],
+                                   dimensions=['sessionDefaultChannelGroup'])
+
+    # 6. Hostnames (30d)
+    print("  Fetching hostnames...", file=sys.stderr)
+    body = build_query(
+        date_ranges=date_range,
+        metrics=['sessions'],
+        dimensions=['hostName'],
+        limit=500,
+        order_bys=[{'metric': {'metricName': 'sessions'}, 'desc': True}]
+    )
+    resp = run_report(service, property_id, body)
+    data['hostnames'] = parse_rows(resp, ['sessions'], dimensions=['hostName'])
+
+    # 7. Page paths (30d)
+    print("  Fetching page paths...", file=sys.stderr)
+    body = build_query(
+        date_ranges=date_range,
+        metrics=['screenPageViews'],
+        dimensions=['pagePath'],
+        limit=500,
+        order_bys=[{'metric': {'metricName': 'screenPageViews'}, 'desc': True}]
+    )
+    resp = run_report(service, property_id, body)
+    data['page_paths'] = parse_rows(resp, ['screenPageViews'], dimensions=['pagePath'])
+
+    # 8. Daily engagement (30d)
+    print("  Fetching daily engagement...", file=sys.stderr)
+    body = build_query(
+        date_ranges=date_range,
+        metrics=['sessions', 'engagedSessions'],
+        dimensions=['date'],
+        limit=31,
+        order_bys=[{'dimension': {'dimensionName': 'date'}, 'desc': False}]
+    )
+    resp = run_report(service, property_id, body)
+    data['daily_engagement'] = parse_rows(resp, ['sessions', 'engagedSessions'],
+                                           dimensions=['date'])
+
     return data
 
 
-# --- 10 Health Checks ---
+# --- Ecommerce Detection ---
+
+def detect_ecommerce(data):
+    """Detect if property is ecommerce based on event data."""
+    event_names = {e['eventName'] for e in data['events']}
+    return 'purchase' in event_names
+
+
+# --- 20 Health Checks ---
 
 def check_data_volume(data):
     """Check 1: Data Volume - is there enough traffic?"""
@@ -137,23 +202,91 @@ def check_conversions(data):
     return 'WARN', "No conversions and no standard conversion events found - set up key events"
 
 
-def check_ecommerce(data):
-    """Check 5: E-commerce Completeness - has purchase but missing funnel steps?"""
+FUNNEL_BENCHMARKS = {
+    'view_to_cart':         {'low': 1, 'high': 50, 'typical': '5-15%'},
+    'cart_to_checkout':     {'low': 10, 'high': 90, 'typical': '30-60%'},
+    'checkout_to_purchase': {'low': 20, 'high': 99, 'typical': '50-80%'},
+}
+
+
+def check_ecommerce(data, is_ecommerce=None):
+    """Check 5: E-commerce Completeness - funnel events, step order, and conversion rates."""
+    if is_ecommerce is False:
+        return 'SKIP', "Not an e-commerce property (skipped by user)"
+
     event_names = {e['eventName'] for e in data['events']}
 
-    if 'purchase' not in event_names:
+    if is_ecommerce is None and 'purchase' not in event_names:
         return 'SKIP', "No purchase events - not an e-commerce property"
 
-    funnel_events = {
-        'view_item': 'view_item',
-        'add_to_cart': 'add_to_cart',
-        'begin_checkout': 'begin_checkout'
-    }
-    missing = [name for key, name in funnel_events.items() if key not in event_names]
+    # Step 1: Check for missing funnel events
+    funnel_events = ['view_item', 'add_to_cart', 'begin_checkout', 'purchase']
+    missing = [e for e in funnel_events if e not in event_names]
 
-    if not missing:
-        return 'PASS', "Full e-commerce funnel tracked (view_item, add_to_cart, begin_checkout, purchase)"
-    return 'WARN', f"E-commerce funnel incomplete. Has purchase but missing: {', '.join(missing)}"
+    if is_ecommerce is True and 'purchase' not in event_names:
+        if 'purchase' not in missing:
+            missing.append('purchase')
+
+    if missing:
+        return 'WARN', f"E-commerce funnel incomplete. Missing: {', '.join(missing)}"
+
+    # Step 2: Extract event counts
+    event_map = {}
+    for e in data['events']:
+        event_map[e['eventName']] = e.get('eventCount', 0)
+
+    view_item = event_map.get('view_item', 0)
+    add_to_cart = event_map.get('add_to_cart', 0)
+    begin_checkout = event_map.get('begin_checkout', 0)
+    purchase = event_map.get('purchase', 0)
+
+    # Step 3: Validate funnel order (step N+1 must be <= step N)
+    order_errors = []
+    if view_item > 0 and add_to_cart > view_item:
+        order_errors.append(f"add_to_cart ({add_to_cart:,.0f}) > view_item ({view_item:,.0f})")
+    if add_to_cart > 0 and begin_checkout > add_to_cart:
+        order_errors.append(f"begin_checkout ({begin_checkout:,.0f}) > add_to_cart ({add_to_cart:,.0f})")
+    if begin_checkout > 0 and purchase > begin_checkout:
+        order_errors.append(f"purchase ({purchase:,.0f}) > begin_checkout ({begin_checkout:,.0f})")
+
+    if order_errors:
+        return 'FAIL', f"Funnel order violation — tracking error: {'; '.join(order_errors)}"
+
+    # Step 4: Benchmark conversion rates
+    warnings = []
+    details = [f"view_item: {view_item:,.0f}, add_to_cart: {add_to_cart:,.0f}, begin_checkout: {begin_checkout:,.0f}, purchase: {purchase:,.0f}"]
+
+    if view_item > 0:
+        rate = add_to_cart / view_item * 100
+        bench = FUNNEL_BENCHMARKS['view_to_cart']
+        details.append(f"View→Cart: {rate:.1f}%")
+        if rate < bench['low']:
+            warnings.append(f"View→Cart rate very low ({rate:.1f}%, typical {bench['typical']})")
+        elif rate > bench['high']:
+            warnings.append(f"View→Cart rate unusually high ({rate:.1f}%, typical {bench['typical']})")
+
+    if add_to_cart > 0:
+        rate = begin_checkout / add_to_cart * 100
+        bench = FUNNEL_BENCHMARKS['cart_to_checkout']
+        details.append(f"Cart→Checkout: {rate:.1f}%")
+        if rate < bench['low']:
+            warnings.append(f"Cart→Checkout rate very low ({rate:.1f}%, typical {bench['typical']})")
+        elif rate > bench['high']:
+            warnings.append(f"Cart→Checkout rate unusually high ({rate:.1f}%, typical {bench['typical']})")
+
+    if begin_checkout > 0:
+        rate = purchase / begin_checkout * 100
+        bench = FUNNEL_BENCHMARKS['checkout_to_purchase']
+        details.append(f"Checkout→Purchase: {rate:.1f}%")
+        if rate < bench['low']:
+            warnings.append(f"Checkout→Purchase rate very low ({rate:.1f}%, typical {bench['typical']})")
+        elif rate > bench['high']:
+            warnings.append(f"Checkout→Purchase rate unusually high ({rate:.1f}%, typical {bench['typical']})")
+
+    detail_str = '. '.join(details)
+    if warnings:
+        return 'WARN', f"{detail_str}. {'; '.join(warnings)}"
+    return 'PASS', f"Full funnel tracked. {detail_str}"
 
 
 def check_referral_spam(data):
@@ -171,9 +304,7 @@ def check_referral_spam(data):
         if sessions < 50:
             continue
 
-        # Check known spam patterns
         is_spam_pattern = any(p in name for p in spam_patterns)
-        # High bounce + referral = suspicious
         is_suspicious = bounce > 0.95 and 'referral' in name
 
         if is_spam_pattern or is_suspicious:
@@ -186,33 +317,45 @@ def check_referral_spam(data):
 
 def check_self_referral(data):
     """Check 7: Self-Referral - primary domain appearing as referral."""
-    # Try to detect domain from landing pages
-    domains = set()
-    for lp in data['landing_pages']:
-        page = lp.get('landingPagePlusQueryString', '')
-        if page.startswith('/'):
-            continue  # Relative path, no domain info in GA4
-        # GA4 landingPagePlusQueryString is usually just the path
-        # This check works best with user-provided domain
-        # For now, skip if we can't detect
-        pass
+    # Build set of own domains from hostname data
+    own_domains = set()
+    for h in data.get('hostnames', []):
+        hostname = h.get('hostName', '')
+        if hostname and hostname not in ('(not set)', ''):
+            own_domains.add(hostname.lower())
 
-    # Check referral sources for common self-referral patterns
     total_sessions = data['core'].get('sessions', 1)
     self_referrals = []
+    self_referral_sessions = 0
 
     for source in data['sources']:
         name = source.get('sessionSourceMedium', '')
         sessions = source.get('sessions', 0)
         pct = (sessions / total_sessions * 100) if total_sessions > 0 else 0
 
-        # Flag if a referral source has unusually high sessions (>5% of total)
-        if '/ referral' in name and pct > 5:
-            self_referrals.append(f"{name} ({pct:.1f}% of sessions)")
+        if '/ referral' not in name:
+            continue
+
+        # Extract source domain from "source / medium" format
+        source_domain = name.split(' / ')[0].strip().lower()
+
+        # Check if referral source matches any own domain
+        is_self = any(
+            source_domain == d or source_domain.endswith('.' + d) or d.endswith('.' + source_domain)
+            for d in own_domains
+        )
+
+        if is_self and sessions > 0:
+            self_referrals.append(f"{name} ({sessions:.0f} sessions, {pct:.1f}%)")
+            self_referral_sessions += sessions
+
+    self_pct = (self_referral_sessions / total_sessions * 100) if total_sessions > 0 else 0
 
     if not self_referrals:
-        return 'PASS', "No obvious self-referral detected"
-    return 'WARN', f"Potential self-referral (verify these are not your own domains): {'; '.join(self_referrals[:3])}"
+        return 'PASS', "No self-referral detected"
+    if self_pct > 5:
+        return 'FAIL', f"Confirmed self-referral ({self_pct:.1f}% of traffic): {'; '.join(self_referrals[:3])}"
+    return 'WARN', f"Minor self-referral detected: {'; '.join(self_referrals[:3])}"
 
 
 def check_not_set_landing_pages(data):
@@ -248,7 +391,7 @@ def check_high_bounce_pages(data):
 
     if not problem_pages:
         return 'PASS', "No landing pages with critically high bounce rate"
-    return 'INFO', f"Pages with >85% bounce rate: {'; '.join(problem_pages[:3])}"
+    return 'WARN', f"Pages with >85% bounce rate: {'; '.join(problem_pages[:3])}"
 
 
 def check_event_variety(data):
@@ -262,19 +405,426 @@ def check_event_variety(data):
     return 'PASS', f"{event_count} unique events tracked"
 
 
-def run_all_checks(data):
-    """Run all 10 health checks, return results."""
+def check_event_naming(data):
+    """Check 11: Event Naming Convention - lowercase + underscores only."""
+    ga4_auto_events = {
+        'first_visit', 'session_start', 'page_view', 'scroll', 'click',
+        'file_download', 'video_start', 'video_progress', 'video_complete',
+        'view_search_results', 'form_start', 'form_submit', 'user_engagement',
+        'first_open', 'app_remove', 'app_update', 'os_update', 'ad_click',
+        'ad_impression', 'screen_view', 'dynamic_link_app_open',
+        'dynamic_link_first_open', 'notification_dismiss',
+        'notification_foreground', 'notification_open', 'notification_receive',
+        'notification_send', 'campaign_details', 'ad_exposure',
+    }
+    naming_re = re.compile(r'^[a-z][a-z0-9_]*$')
+    bad_events = []
+
+    for event in data['events']:
+        name = event.get('eventName', '')
+        if name in ga4_auto_events:
+            continue
+        if not naming_re.match(name):
+            bad_events.append(name)
+
+    if not bad_events:
+        return 'PASS', "All custom events follow GA4 naming convention (lowercase + underscores)"
+    if len(bad_events) <= 3:
+        return 'WARN', f"{len(bad_events)} event(s) with non-standard names: {', '.join(bad_events[:5])}"
+    return 'FAIL', f"{len(bad_events)} events with non-standard names (systemic issue): {', '.join(bad_events[:5])}"
+
+
+def check_recommended_events(data, is_ecommerce=None):
+    """Check 12: Recommended Events Coverage - are GA4 recommended events implemented?"""
+    event_names = {e['eventName'] for e in data['events']}
+
+    if is_ecommerce is None:
+        is_ecom = 'purchase' in event_names
+    else:
+        is_ecom = is_ecommerce
+
+    if is_ecom:
+        recommended = [
+            'view_item', 'add_to_cart', 'begin_checkout', 'purchase',
+            'view_item_list', 'select_item', 'add_payment_info',
+            'add_shipping_info', 'remove_from_cart', 'view_promotion', 'select_promotion'
+        ]
+        label = "ecommerce"
+    else:
+        recommended = ['login', 'sign_up', 'search', 'share', 'generate_lead', 'select_content']
+        label = "non-ecommerce"
+
+    found = [e for e in recommended if e in event_names]
+    missing = [e for e in recommended if e not in event_names]
+    pct = len(found) / len(recommended) * 100 if recommended else 0
+
+    if pct >= 70:
+        return 'PASS', f"{len(found)}/{len(recommended)} {label} recommended events implemented ({pct:.0f}%)"
+    if pct >= 40:
+        top_missing = ', '.join(missing[:3])
+        return 'WARN', f"{len(found)}/{len(recommended)} {label} recommended events ({pct:.0f}%). Top missing: {top_missing}"
+    return 'INFO', f"{len(found)}/{len(recommended)} {label} recommended events ({pct:.0f}%) - early-stage property"
+
+
+def check_payment_gateways(data):
+    """Check 13: Payment Gateway Referral - gateways polluting attribution."""
+    gateway_patterns = [
+        'stripe', 'paypal', 'square', 'braintree', 'adyen', 'mollie',
+        'checkout.com', 'worldpay', 'klarna', 'shopify.com/pay'
+    ]
+    total_sessions = data['core'].get('sessions', 1)
+    gateway_sources = []
+
+    for source in data['sources']:
+        name = source.get('sessionSourceMedium', '').lower()
+        sessions = source.get('sessions', 0)
+        revenue = source.get('totalRevenue', 0)
+        purchases = source.get('ecommercePurchases', 0)
+        if '/ referral' not in name:
+            continue
+        for pattern in gateway_patterns:
+            if pattern in name:
+                pct = (sessions / total_sessions * 100) if total_sessions > 0 else 0
+                gateway_sources.append({
+                    'source': source['sessionSourceMedium'],
+                    'sessions': sessions,
+                    'pct': pct,
+                    'revenue': revenue,
+                    'purchases': purchases,
+                })
+                break
+
+    if not gateway_sources:
+        return 'PASS', "No payment gateways found in referral sources"
+
+    has_revenue = any(g['revenue'] > 0 for g in gateway_sources)
+    details_parts = []
+    for g in gateway_sources[:3]:
+        parts = f"{g['source']} ({g['sessions']:.0f} sessions, {g['pct']:.1f}%"
+        if has_revenue:
+            parts += f", {g['revenue']:,.2f} revenue, {g['purchases']:.0f} purchases"
+        parts += ")"
+        details_parts.append(parts)
+    details = '; '.join(details_parts)
+
+    if any(g['pct'] > 1 for g in gateway_sources):
+        return 'FAIL', f"Payment gateway referrals breaking attribution: {details}"
+    return 'WARN', f"Payment gateway in referral sources (low volume): {details}"
+
+
+def check_channel_diversification(data):
+    """Check 14: Channel Diversification - over-reliance on one channel?"""
+    channels = data.get('channels', [])
+    if not channels:
+        return 'SKIP', "No channel data available"
+
+    total_sessions = sum(c.get('sessions', 0) for c in channels)
+    if total_sessions == 0:
+        return 'SKIP', "No sessions in channel data"
+
+    sorted_channels = sorted(channels, key=lambda c: c.get('sessions', 0), reverse=True)
+    top = sorted_channels[0]
+    top_name = top.get('sessionDefaultChannelGroup', 'Unknown')
+    top_sessions = top.get('sessions', 0)
+    top_pct = (top_sessions / total_sessions * 100)
+
+    top3 = []
+    for c in sorted_channels[:3]:
+        name = c.get('sessionDefaultChannelGroup', 'Unknown')
+        sess = c.get('sessions', 0)
+        pct = (sess / total_sessions * 100)
+        top3.append(f"{name} ({pct:.0f}%)")
+    top3_str = ', '.join(top3)
+
+    if top_pct > 85:
+        return 'FAIL', f"Critical channel dependency: {top_name} has {top_pct:.0f}% of traffic. Top 3: {top3_str}"
+    if top_pct > 70:
+        return 'WARN', f"Over-reliance on {top_name} ({top_pct:.0f}% of traffic). Top 3: {top3_str}"
+    return 'PASS', f"Traffic well distributed. Top 3: {top3_str}"
+
+
+def check_hostname_pollution(data):
+    """Check 15: Hostname Pollution - dev/staging traffic in production data."""
+    hostnames = data.get('hostnames', [])
+    if not hostnames:
+        return 'SKIP', "No hostname data available"
+
+    total_sessions = sum(h.get('sessions', 0) for h in hostnames)
+    if total_sessions == 0:
+        return 'SKIP', "No sessions in hostname data"
+
+    dev_patterns = ['localhost', '127.0.0.1', 'dev.', 'staging.', 'test.', 'preview.']
+    ip_re = re.compile(r'^\d+\.\d+\.\d+\.\d+$')
+    bad_sessions = 0
+    bad_hosts = []
+    not_set_sessions = 0
+
+    for h in hostnames:
+        hostname = h.get('hostName', '')
+        sessions = h.get('sessions', 0)
+
+        if hostname in ('(not set)', ''):
+            not_set_sessions += sessions
+            continue
+
+        is_bad = any(p in hostname.lower() for p in dev_patterns) or ip_re.match(hostname)
+        if is_bad:
+            bad_sessions += sessions
+            bad_hosts.append(f"{hostname} ({sessions:.0f})")
+
+    bad_pct = (bad_sessions / total_sessions * 100) if total_sessions > 0 else 0
+    not_set_pct = (not_set_sessions / total_sessions * 100) if total_sessions > 0 else 0
+
+    details = []
+    if bad_hosts:
+        details.append(f"Dev/test hosts: {'; '.join(bad_hosts[:3])} ({bad_pct:.1f}%)")
+    if not_set_pct > 10:
+        details.append(f"(not set) hostname: {not_set_pct:.1f}%")
+
+    if bad_pct > 5:
+        return 'FAIL', f"Significant dev/test traffic polluting data. {'; '.join(details)}"
+    if bad_pct > 1 or not_set_pct > 10:
+        return 'WARN', '; '.join(details) if details else f"Minor hostname issues ({bad_pct:.1f}% dev/test)"
+    return 'PASS', f"Clean hostnames ({bad_pct:.1f}% dev/test traffic)"
+
+
+def check_pii_in_urls(data):
+    """Check 16: PII in URLs - email, phone, or credentials in page paths."""
+    page_paths = data.get('page_paths', [])
+    if not page_paths:
+        return 'SKIP', "No page path data available"
+
+    email_re = re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
+    phone_re = re.compile(r'(?:tel=|phone=|mobile=)\+?\d[\d\s\-]{7,}')
+    cred_re = re.compile(r'(?:password|passwd|pwd|secret|token)=', re.IGNORECASE)
+
+    emails_found = []
+    phones_found = []
+    creds_found = []
+
+    for p in page_paths:
+        path = p.get('pagePath', '')
+        if '?' not in path and '=' not in path:
+            continue
+        if email_re.search(path):
+            emails_found.append(path[:80])
+        if phone_re.search(path):
+            phones_found.append(path[:80])
+        if cred_re.search(path):
+            creds_found.append(path[:80])
+
+    if emails_found or creds_found:
+        issues = []
+        if emails_found:
+            issues.append(f"{len(emails_found)} URL(s) with email addresses")
+        if creds_found:
+            issues.append(f"{len(creds_found)} URL(s) with credential parameters")
+        return 'FAIL', f"PII compliance risk: {'; '.join(issues)}. Example: {(emails_found or creds_found)[0]}"
+    if phones_found:
+        return 'WARN', f"Phone numbers in {len(phones_found)} URL(s). Example: {phones_found[0]}"
+    return 'PASS', "No PII detected in top 500 page URLs"
+
+
+def check_bot_traffic(data):
+    """Check 17: Bot Traffic - sources with near-zero engagement."""
+    total_sessions = data['core'].get('sessions', 1)
+    suspicious_sessions = 0
+    suspicious_sources = []
+
+    for source in data['sources']:
+        name = source.get('sessionSourceMedium', '')
+        sessions = source.get('sessions', 0)
+        engaged = source.get('engagedSessions', 0)
+        bounce = source.get('bounceRate', 0)
+        avg_duration = source.get('averageSessionDuration', 0)
+
+        if sessions < 20:
+            continue
+
+        engagement_rate = (engaged / sessions * 100) if sessions > 0 else 0
+        is_suspicious = False
+
+        if engagement_rate < 5 and sessions >= 50:
+            is_suspicious = True
+        elif bounce > 0.99 and sessions >= 20:
+            is_suspicious = True
+        elif avg_duration == 0 and sessions >= 50:
+            is_suspicious = True
+
+        if is_suspicious:
+            suspicious_sessions += sessions
+            suspicious_sources.append(
+                f"{name} ({sessions:.0f} sess, {engagement_rate:.0f}% engaged)"
+            )
+
+    bot_pct = (suspicious_sessions / total_sessions * 100) if total_sessions > 0 else 0
+
+    if bot_pct > 15:
+        return 'FAIL', f"{bot_pct:.1f}% suspected bot traffic ({suspicious_sessions:.0f} sessions): {'; '.join(suspicious_sources[:3])}"
+    if bot_pct > 5:
+        return 'WARN', f"{bot_pct:.1f}% suspected bot traffic: {'; '.join(suspicious_sources[:3])}"
+    return 'PASS', f"Bot traffic estimate: {bot_pct:.1f}%"
+
+
+def check_event_quality(data):
+    """Check 18: Event Quality - test events, tag loops, near-duplicates."""
+    events = data['events']
+    total_sessions = data['core'].get('sessions', 1)
+    issues = []
+
+    # Auto-events to exclude from test-event check
+    auto_events = {
+        'first_visit', 'session_start', 'user_engagement', 'page_view',
+        'scroll', 'click', 'file_download', 'video_start', 'video_progress',
+        'video_complete', 'view_search_results', 'form_start', 'form_submit',
+        'first_open', 'app_remove', 'app_update', 'os_update', 'screen_view',
+        'refund',
+    }
+
+    # Sub-check 1: Test events (<=2 fires in 30d, excluding auto-events)
+    test_events = []
+    for e in events:
+        name = e.get('eventName', '')
+        count = e.get('eventCount', 0)
+        if name in auto_events:
+            continue
+        if count <= 2:
+            test_events.append(name)
+
+    if test_events:
+        issues.append(f"{len(test_events)} event(s) with ≤2 fires (possible test): {', '.join(test_events[:5])}")
+
+    # Sub-check 2: Extremely high count (>10x sessions = tag loop)
+    loop_events = []
+    for e in events:
+        name = e.get('eventName', '')
+        count = e.get('eventCount', 0)
+        if name in auto_events:
+            continue
+        if total_sessions > 0 and count > total_sessions * 10:
+            loop_events.append(f"{name} ({count:,.0f} fires vs {total_sessions:,.0f} sessions)")
+
+    if loop_events:
+        return 'FAIL', f"Possible tag loop — event count >10x sessions: {'; '.join(loop_events[:3])}"
+
+    # Sub-check 3: Near-duplicate names (same when normalized)
+    def normalize(name):
+        return re.sub(r'[^a-z0-9]', '', name.lower())
+
+    normalized_map = {}
+    for e in events:
+        name = e.get('eventName', '')
+        norm = normalize(name)
+        if norm not in normalized_map:
+            normalized_map[norm] = []
+        normalized_map[norm].append(name)
+
+    duplicates = {k: v for k, v in normalized_map.items() if len(v) > 1}
+    if duplicates:
+        dup_strs = [' / '.join(v) for v in list(duplicates.values())[:3]]
+        issues.append(f"Near-duplicate event names: {'; '.join(dup_strs)}")
+
+    if not issues:
+        return 'PASS', f"Event quality good ({len(events)} events, no anomalies)"
+    severity = 'WARN'
+    return severity, '; '.join(issues)
+
+
+def check_direct_traffic(data):
+    """Check 19: Direct Traffic - high direct percentage indicates UTM/tracking gaps."""
+    channels = data.get('channels', [])
+    if not channels:
+        return 'SKIP', "No channel data available"
+
+    total_sessions = sum(c.get('sessions', 0) for c in channels)
+    if total_sessions == 0:
+        return 'SKIP', "No sessions in channel data"
+
+    direct_sessions = 0
+    for c in channels:
+        name = c.get('sessionDefaultChannelGroup', '').lower()
+        if name in ('direct', 'direct / (none)'):
+            direct_sessions += c.get('sessions', 0)
+
+    direct_pct = (direct_sessions / total_sessions * 100) if total_sessions > 0 else 0
+
+    if direct_pct > 60:
+        return 'FAIL', f"Direct traffic is {direct_pct:.0f}% — UTMs likely missing or cross-domain tracking broken"
+    if direct_pct > 40:
+        return 'WARN', f"Direct traffic is {direct_pct:.0f}% — review UTM tagging across campaigns"
+    return 'PASS', f"Direct traffic: {direct_pct:.0f}%"
+
+
+def check_engagement_anomalies(data):
+    """Check 20: Engagement Rate Anomalies - daily consistency check."""
+    daily = data.get('daily_engagement', [])
+    if len(daily) < 7:
+        return 'SKIP', "Insufficient daily data for anomaly detection"
+
+    # Calculate daily engagement rates
+    rates = []
+    for day in daily:
+        sessions = day.get('sessions', 0)
+        engaged = day.get('engagedSessions', 0)
+        if sessions > 0:
+            rates.append(engaged / sessions * 100)
+
+    if len(rates) < 7:
+        return 'SKIP', "Insufficient days with data for anomaly detection"
+
+    # Exclude last day if it's anomalous (GA4 processing delay)
+    analysis_rates = rates[:-1] if len(rates) > 7 else rates
+
+    avg = sum(analysis_rates) / len(analysis_rates)
+    variance = sum((r - avg) ** 2 for r in analysis_rates) / len(analysis_rates)
+    std = variance ** 0.5
+
+    # 5-sigma anomaly detection (conservative)
+    anomalous_days = 0
+    for r in analysis_rates:
+        if std > 0 and abs(r - avg) > 5 * std:
+            anomalous_days += 1
+
+    issues = []
+    if avg < 25:
+        return 'FAIL', f"Average engagement rate {avg:.1f}% — critical tracking issue or severe bot traffic"
+    if avg > 90:
+        issues.append(f"avg engagement {avg:.1f}% is suspiciously high")
+    if avg < 40:
+        issues.append(f"avg engagement {avg:.1f}% is below healthy range")
+    if std > 15:
+        issues.append(f"high daily variance (std {std:.1f}pp)")
+    if anomalous_days > 0:
+        issues.append(f"{anomalous_days} anomalous day(s) detected")
+
+    if issues:
+        return 'WARN', f"Engagement anomalies: {'; '.join(issues)}. Daily avg: {avg:.1f}%, std: {std:.1f}pp"
+    return 'PASS', f"Engagement rate stable. Daily avg: {avg:.1f}%, std: {std:.1f}pp"
+
+
+def run_all_checks(data, is_ecommerce=None):
+    """Run all 20 health checks, return results."""
     checks = [
-        ('Data Volume', check_data_volume),
-        ('Duplicate Tracking', check_duplicate_tracking),
-        ('Enhanced Measurement', check_enhanced_measurement),
-        ('Conversion Events', check_conversions),
-        ('E-commerce Completeness', check_ecommerce),
-        ('Referral Spam', check_referral_spam),
-        ('Self-Referral', check_self_referral),
-        ('(not set) Landing Pages', check_not_set_landing_pages),
-        ('High Bounce Pages', check_high_bounce_pages),
-        ('Event Variety', check_event_variety),
+        ('Data Volume', lambda d: check_data_volume(d)),
+        ('Duplicate Tracking', lambda d: check_duplicate_tracking(d)),
+        ('Enhanced Measurement', lambda d: check_enhanced_measurement(d)),
+        ('Conversion Events', lambda d: check_conversions(d)),
+        ('E-commerce Completeness', lambda d: check_ecommerce(d, is_ecommerce)),
+        ('Referral Spam', lambda d: check_referral_spam(d)),
+        ('Self-Referral', lambda d: check_self_referral(d)),
+        ('(not set) Landing Pages', lambda d: check_not_set_landing_pages(d)),
+        ('High Bounce Pages', lambda d: check_high_bounce_pages(d)),
+        ('Event Variety', lambda d: check_event_variety(d)),
+        ('Event Naming', lambda d: check_event_naming(d)),
+        ('Recommended Events', lambda d: check_recommended_events(d, is_ecommerce)),
+        ('Payment Gateway Referral', lambda d: check_payment_gateways(d)),
+        ('Channel Diversification', lambda d: check_channel_diversification(d)),
+        ('Hostname Pollution', lambda d: check_hostname_pollution(d)),
+        ('PII in URLs', lambda d: check_pii_in_urls(d)),
+        ('Bot Traffic', lambda d: check_bot_traffic(d)),
+        ('Event Quality', lambda d: check_event_quality(d)),
+        ('Direct Traffic', lambda d: check_direct_traffic(d)),
+        ('Engagement Rate Anomalies', lambda d: check_engagement_anomalies(d)),
     ]
 
     results = []
@@ -290,36 +840,38 @@ def run_all_checks(data):
 
 
 def calculate_score(results):
-    """Calculate health score 0-100."""
+    """Calculate health score 0-100. PASS=1.0, WARN=0.5, FAIL=0.0."""
     scored = [r for r in results if r['status'] not in ('SKIP', 'INFO')]
     if not scored:
         return 100
 
-    passed = sum(1 for r in scored if r['status'] == 'PASS')
-    return int(passed / len(scored) * 100)
+    score_map = {'PASS': 1.0, 'WARN': 0.5, 'FAIL': 0.0}
+    total = sum(score_map.get(r['status'], 0) for r in scored)
+    return int(total / len(scored) * 100)
 
 
-def format_markdown(property_name, results, score):
-    """Format results as markdown."""
-    status_icons = {
-        'PASS': 'Pass',
-        'WARN': 'Warning',
-        'FAIL': 'Fail',
-        'SKIP': 'Skipped',
-        'INFO': 'Info'
-    }
+GATEWAY_PATTERNS = [
+    'stripe', 'paypal', 'square', 'braintree', 'adyen', 'mollie',
+    'checkout.com', 'worldpay', 'klarna', 'shopify.com/pay'
+]
+
+
+def format_markdown(property_name, results, score, data=None, lang='en'):
+    """Format results as markdown with translation support."""
+    t = get_translator(lang)
 
     lines = [
-        f"## GA4 Health Check: {property_name}",
-        f"**Health Score: {score}/100**\n",
-        "| # | Check | Status | Details |",
+        f"## {t['report_title']}: {property_name}",
+        f"**{t['health_score']}: {score}/100**\n",
+        f"| {t['table_headers']['num']} | {t['table_headers']['check']} | {t['table_headers']['status']} | {t['table_headers']['details']} |",
         "|---|-------|--------|---------|"
     ]
 
     for i, r in enumerate(results, 1):
-        status = status_icons.get(r['status'], r['status'])
+        check_name = t['check_names'].get(r['check'], r['check'])
+        status = t['status_labels'].get(r['status'], r['status'])
         detail = r['detail'].replace('|', '\\|')
-        lines.append(f"| {i} | {r['check']} | {status} | {detail} |")
+        lines.append(f"| {i} | {check_name} | {status} | {detail} |")
 
     # Summary
     fails = sum(1 for r in results if r['status'] == 'FAIL')
@@ -327,35 +879,150 @@ def format_markdown(property_name, results, score):
 
     lines.append("")
     if fails > 0:
-        lines.append(f"**{fails} critical issue(s) found.** Fix these before trusting your data.")
+        lines.append(f"**{t['critical_issues_summary'].format(count=fails)}**")
     if warns > 0:
-        lines.append(f"**{warns} warning(s).** Review and address when possible.")
+        lines.append(f"**{t['warnings_summary'].format(count=warns)}**")
     if fails == 0 and warns == 0:
-        lines.append("All checks passed. Data quality looks good.")
+        lines.append(t['all_passed'])
+
+    # What to Fix section
+    actionable = [r for r in results if r['status'] in ('FAIL', 'WARN')]
+    if actionable:
+        lines.append("")
+        lines.append(f"### {t['what_to_fix']}")
+        lines.append("")
+        for r in actionable:
+            check_name = t['check_names'].get(r['check'], r['check'])
+            status = r['status']
+            remediation_dict = t.get('remediation', {}).get(r['check'], {})
+            remediation = remediation_dict.get(status, '')
+
+            if status == 'FAIL':
+                priority = t['priority_critical']
+            else:
+                priority = t['priority_recommended']
+
+            if remediation:
+                lines.append(f"**{check_name}** ({priority}): {remediation}")
+            else:
+                lines.append(f"**{check_name}** ({priority}): {r['detail']}")
+
+            # Gateway breakdown table
+            if r['check'] == 'Payment Gateway Referral' and data:
+                gw_rows = []
+                for source in data.get('sources', []):
+                    name = source.get('sessionSourceMedium', '').lower()
+                    if '/ referral' not in name:
+                        continue
+                    if any(p in name for p in GATEWAY_PATTERNS):
+                        gw_rows.append(source)
+
+                if gw_rows:
+                    has_rev = any(s.get('totalRevenue', 0) > 0 for s in gw_rows)
+                    lines.append("")
+                    if has_rev:
+                        lines.append("| Source | Sessions | Revenue | Purchases |")
+                        lines.append("|--------|----------|---------|-----------|")
+                        for s in gw_rows:
+                            lines.append(f"| {s['sessionSourceMedium']} | {s.get('sessions', 0):,.0f} | {s.get('totalRevenue', 0):,.2f} | {s.get('ecommercePurchases', 0):,.0f} |")
+                    else:
+                        total = data.get('core', {}).get('sessions', 1)
+                        lines.append("| Source | Sessions | % of Total |")
+                        lines.append("|--------|----------|------------|")
+                        for s in gw_rows:
+                            sess = s.get('sessions', 0)
+                            pct = (sess / total * 100) if total > 0 else 0
+                            lines.append(f"| {s['sessionSourceMedium']} | {sess:,.0f} | {pct:.1f}% |")
+
+            lines.append("")
 
     lines.append("")
-    lines.append("*These are 10 basic health checks. For a comprehensive 50-check audit")
-    lines.append("including Admin API settings, GTM analysis, and consent mode verification,")
-    lines.append("visit audit.dataarsenal.com*")
+    lines.append(f"*{t['footer_note']}*")
 
     return "\n".join(lines)
 
 
+def open_file(path):
+    """Open a file with the default application (cross-platform)."""
+    system = platform.system()
+    try:
+        if system == 'Darwin':
+            subprocess.run(['open', path], check=False)
+        elif system == 'Windows':
+            os.startfile(path)
+        elif system == 'Linux':
+            subprocess.run(['xdg-open', path], check=False)
+    except Exception:
+        pass  # Silently fail - user can open manually
+
+
 def main():
-    parser = argparse.ArgumentParser(description='GA4 Health Check (10 built-in checks)')
+    parser = argparse.ArgumentParser(description='GA4 Health Check')
     parser.add_argument('property', help='GA4 property ID or name (use "list" to see all)')
-    parser.add_argument('--format', choices=['markdown', 'json'], default='markdown')
+    parser.add_argument('--format', choices=['markdown', 'json', 'pdf'], default='markdown')
+    parser.add_argument('--lang', default='en', help='Report language (en, bg)')
+    parser.add_argument('--ecommerce', choices=['auto', 'yes', 'no'], default='auto',
+                        help='Ecommerce mode: auto-detect, force yes, or force no')
+    parser.add_argument('--output', help='PDF output path (default: ~/Desktop/)')
     args = parser.parse_args()
 
+    config = load_config()
+
+    # Cloud mode - call dataarsenal.com API
+    if config.get('mode') == 'cloud' and config.get('api_key'):
+        api_key = config['api_key']
+        property_id = args.property
+        # Normalize to properties/ prefix
+        if property_id.isdigit():
+            property_id = f'properties/{property_id}'
+        elif not property_id.startswith('properties/'):
+            property_id = f'properties/{property_id}'
+
+        fmt = 'json' if args.format in ('json', 'pdf') else 'markdown'
+        print(f"Running 50-check cloud audit...\n", file=sys.stderr)
+        property_name, content, score, cloud_data = cloud_audit(
+            api_key, property_id, ecommerce=args.ecommerce, fmt=fmt
+        )
+
+        if args.format == 'json':
+            print(json.dumps(cloud_data, indent=2))
+        elif args.format == 'pdf':
+            # Cloud returns markdown - save as PDF via local PDF generator
+            # For now, print the markdown and note PDF is cloud-only feature
+            markdown = cloud_data.get('markdown', str(content))
+            print(f"Property: {property_name}")
+            print(f"Health Score: {score}/100 - {cloud_data.get('health_status', '')}")
+            print(f"Checks: {cloud_data.get('checks_passed', 0)}/{cloud_data.get('checks_total', 0)} passed, {cloud_data.get('checks_failed', 0)} failed")
+            print()
+            print(markdown)
+            print(f"\nCloud mode: PDF generation coming soon.", file=sys.stderr)
+        else:
+            print(f"Property: {property_name}")
+            print(f"Health Score: {score}/100 - {cloud_data.get('health_status', '')}")
+            print(f"Checks: {cloud_data.get('checks_passed', 0)}/{cloud_data.get('checks_total', 0)} passed, {cloud_data.get('checks_failed', 0)} failed")
+            print()
+            print(content)
+        return
+
+    # Local mode - run 20 built-in checks
     creds = require_credentials()
     property_id = resolve_property(creds, args.property)
     service = get_data_service(creds)
     property_name = get_property_name(creds, property_id)
 
-    print(f"Running health checks for {property_name}...\n", file=sys.stderr)
+    print(f"Running 20 local health checks for {property_name}...\n", file=sys.stderr)
 
     data = fetch_audit_data(service, property_id)
-    results = run_all_checks(data)
+
+    # Resolve ecommerce mode
+    if args.ecommerce == 'yes':
+        is_ecommerce = True
+    elif args.ecommerce == 'no':
+        is_ecommerce = False
+    else:
+        is_ecommerce = None  # auto-detect per check
+
+    results = run_all_checks(data, is_ecommerce)
     score = calculate_score(results)
 
     if args.format == 'json':
@@ -365,8 +1032,15 @@ def main():
             'checks': results
         }
         print(json.dumps(output, indent=2))
+    elif args.format == 'pdf':
+        from _pdf_report import generate_pdf
+        path = generate_pdf(property_name, results, score, data,
+                           lang=args.lang, output_path=args.output)
+        # Also print markdown to stdout for terminal display
+        print(format_markdown(property_name, results, score, data, lang=args.lang))
+        print(f"\nPDF saved: {path}", file=sys.stderr)
     else:
-        print(format_markdown(property_name, results, score))
+        print(format_markdown(property_name, results, score, data, lang=args.lang))
 
 
 if __name__ == '__main__':

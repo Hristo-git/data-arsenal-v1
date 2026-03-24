@@ -1,0 +1,76 @@
+{
+  "business_name": "",
+  "url": "",
+  "property_id": "",
+  "description": "",
+  "business_type": "",
+  "target_audience": "",
+  "markets": "",
+  "contact": { "name": "", "email": "" },
+
+  "goals": {
+    "primary_goals": "",
+    "has_targets": false,
+    "key_metric": "",
+    "growth_target": ""
+  },
+
+  "funnel": {
+    "active_channels": [],
+    "priority_channel": "",
+    "best_channel": "",
+    "needs_improvement": "",
+    "channel_manager": "",
+    "conversion_rate": "",
+    "average_order_value": ""
+  },
+
+  "products": {
+    "priority_products": "",
+    "competitive_advantages": "",
+    "seo_keywords": [],
+    "ad_notes": ""
+  },
+
+  "seasonality": {
+    "description": "",
+    "peak_months": [],
+    "low_months": []
+  },
+
+  "competitors": [
+    { "name": "", "url": "" }
+  ],
+
+  "gaps": {
+    "offline_steps": false,
+    "budget_method": "",
+    "specific_problem": "",
+    "ai_monitoring": "",
+    "additional_notes": ""
+  },
+
+  "enrichment": {
+    "client_site": {
+      "platform": "",
+      "gtm_id": "",
+      "ga4_id": "",
+      "meta_pixel": false,
+      "consent_banner": "",
+      "navigation_sections": [],
+      "value_propositions": [],
+      "detected_services": []
+    },
+    "competitors": [],
+    "enriched_at": ""
+  },
+
+  "what_changed": {
+    "campaign_changes": "",
+    "site_changes": "",
+    "technical_changes": "",
+    "external_factors": ""
+  },
+
+  "last_updated": ""
+}
