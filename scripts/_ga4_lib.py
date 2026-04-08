@@ -74,7 +74,20 @@ def authenticate():
     os.makedirs(CONFIG_DIR, exist_ok=True)
 
     flow = InstalledAppFlow.from_client_config(BUNDLED_CLIENT_CONFIG, SCOPES)
-    creds = flow.run_local_server(port=0, prompt='consent')
+    try:
+        creds = flow.run_local_server(port=0, prompt='consent')
+    except Exception:
+        # Fallback for headless environments: show URL, ask user to paste code
+        flow.redirect_uri = 'urn:ietf:wg:oauth:2.0:oob'
+        auth_url, _ = flow.authorization_url(prompt='consent')
+        print("\n" + "="*60)
+        print("Отворете този URL в браузър и разрешете достъп:")
+        print("="*60)
+        print(auth_url)
+        print("="*60)
+        code = input("\nПоставете кода от страницата тук: ").strip()
+        flow.fetch_token(code=code)
+        creds = flow.credentials
     save_credentials(creds)
     return creds
 
