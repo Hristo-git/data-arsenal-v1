@@ -215,10 +215,18 @@ def copy_scripts(language='English', mode='local', api_key=None):
             # Remove existing file/symlink before creating new symlink
             if os.path.exists(dst) or os.path.islink(dst):
                 os.remove(dst)
-            os.symlink(src, dst)
+            try:
+                os.symlink(src, dst)
+            except (OSError, NotImplementedError):
+                # Fallback for Windows without symlink privileges: copy the file
+                import shutil
+                shutil.copy2(src, dst)
             if not script.endswith('.py'):
                 # Ensure repo file is executable
-                os.chmod(src, 0o755)
+                try:
+                    os.chmod(src, 0o755)
+                except OSError:
+                    pass
             copied += 1
 
     print(f"\nLinked {copied} scripts to {SCRIPTS_DIR} (synced with repo)")
