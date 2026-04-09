@@ -706,6 +706,183 @@ def generate_brief_pdf(property_name, period_info, key_insight, findings,
     return output_path
 
 
+def _whatchanged_output_path(property_name):
+    """Return default what-changed PDF output path on Desktop."""
+    desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
+    if not os.path.isdir(desktop):
+        desktop = os.path.expanduser('~')
+    slug = _slugify(property_name)
+    today = date.today().strftime('%Y-%m-%d')
+    return os.path.join(desktop, f'ga4-what-changed-{slug}-{today}.pdf')
+
+
+def generate_whatchanged_pdf(property_name, reports, days=7, lang='en', output_path=None):
+    """Generate what-changed PDF report, return file path.
+
+    Args:
+        property_name: Display name + property ID string
+        reports: List of report dicts from ga4-what-changed script
+        days: Number of days in the comparison period
+        lang: Language code ('en' or 'bg')
+        output_path: Optional output file path
+    """
+    from _ga4_lib import format_number
+
+    if not output_path:
+        output_path = _whatchanged_output_path(property_name)
+
+    pdf = AuditPDF(lang=lang)
+    pdf.alias_nb_pages()
+    pdf.add_page()
+    ff = pdf._font_family
+    page_w = pdf.w - pdf.l_margin - pdf.r_margin
+
+    # --- Header ---
+    pdf.set_font(ff, 'B', 22)
+    pdf.set_text_color(*COLOR_DARK)
+    pdf.cell(0, 12, _safe_text('What Changed'), 0, 1, 'L')
+
+    pdf.set_font(ff, '', 11)
+    pdf.set_text_color(*COLOR_GRAY)
+    pdf.cell(0, 6, _safe_text(property_name), 0, 1, 'L')
+
+    # Period info from first report that has it
+    for r in reports:
+        if r and r.get('period'):
+            pdf.cell(0, 6, _safe_text(f"Period: {r['period']}"), 0, 1, 'L')
+            break
+
+    pdf.ln(4)
+
+    # --- Reports ---
+    for report in reports:
+        if report is None:
+            continue
+
+        _ensure_page_space(pdf, 20)
+
+        # Section title
+        pdf.set_font(ff, 'B', 13)
+        pdf.set_text_color(*COLOR_DARK)
+        pdf.cell(0, 8, _safe_text(report['title']), 0, 1, 'L')
+        pdf.set_draw_color(200, 200, 200)
+        pdf.line(pdf.l_margin, pdf.get_y(), pdf.l_margin + page_w, pdf.get_y())
+        pdf.ln(2)
+
+        if report['type'] == 'overview':
+            _render_overview_table(pdf, report, ff, page_w)
+        else:
+            if not report.get('rows'):
+                pdf.set_font(ff, '', 9)
+                pdf.set_text_color(*COLOR_GRAY)
+                pdf.cell(0, 6, 'No significant changes detected.', 0, 1, 'L')
+            else:
+                _render_dimension_table(pdf, report, ff, page_w)
+
+                total = report.get('total_changes', 0)
+                shown = len(report.get('rows', []))
+                if total > shown:
+                    pdf.set_font(ff, '', 8)
+                    pdf.set_text_color(*COLOR_GRAY)
+                    pdf.cell(0, 5, f'Showing top {shown} of {total} changes.', 0, 1, 'L')
+
+        pdf.ln(6)
+
+    # Footer note
+    pdf.set_font(ff, '', 8)
+    pdf.set_text_color(*COLOR_GRAY)
+    pdf.cell(0, 5, _safe_text('Data Arsenal v1 | dataarsenal.com'), 0, 1, 'L')
+
+    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
+    pdf.output(output_path)
+    return output_path
+
+
+def _render_overview_table(pdf, report, ff, page_w):
+    """Render overview (no-dimension) table."""
+    col_w = [page_w * 0.35, page_w * 0.16, page_w * 0.16, page_w * 0.18, page_w * 0.15]
+    headers = ['Metric', 'Current', 'Previous', 'Change', '%']
+
+    # Header row
+    pdf.set_font(ff, 'B', 8)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.set_text_color(*COLOR_DARK)
+    for i, h in enumerate(headers):
+        pdf.cell(col_w[i], 6, h, 0, 0, 'C', True)
+    pdf.ln()
+
+    # Data rows
+    for idx, r in enumerate(report['rows']):
+        _ensure_page_space(pdf, 6)
+        fill = idx % 2 == 1
+        pdf.set_fill_color(248, 248, 248)
+        pdf.set_font(ff, '', 8)
+        pdf.set_text_color(*COLOR_DARK)
+
+        is_rate = r['metric'] in ('engagementRate', 'bounceRate')
+        cur_str = format_number(r['current'], is_rate)
+        prev_str = format_number(r['previous'], is_rate)
+        pct_str = f"{r['pct']:+.1f}%"
+
+        pct = r['pct']
+        change_color = COLOR_RED if pct < -5 else (COLOR_GREEN if pct > 5 else COLOR_DARK)
+
+        pdf.cell(col_w[0], 5, _safe_text(r['metric']), 0, 0, 'L', fill)
+        pdf.cell(col_w[1], 5, _safe_text(cur_str), 0, 0, 'C', fill)
+        pdf.cell(col_w[2], 5, _safe_text(prev_str), 0, 0, 'C', fill)
+
+        pdf.set_text_color(*change_color)
+        pdf.cell(col_w[3], 5, _safe_text(r['change']), 0, 0, 'C', fill)
+        pdf.cell(col_w[4], 5, pct_str, 0, 0, 'C', fill)
+        pdf.set_text_color(*COLOR_DARK)
+        pdf.ln()
+
+
+def _render_dimension_table(pdf, report, ff, page_w):
+    """Render dimension breakdown table."""
+    col_w = [page_w * 0.28, page_w * 0.20, page_w * 0.12, page_w * 0.12, page_w * 0.14, page_w * 0.08, page_w * 0.06]
+    headers = ['Dimension', 'Metric', 'Current', 'Previous', 'Change', '%', 'Impact']
+
+    # Header row
+    pdf.set_font(ff, 'B', 7.5)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.set_text_color(*COLOR_DARK)
+    for i, h in enumerate(headers):
+        pdf.cell(col_w[i], 6, h, 0, 0, 'C', True)
+    pdf.ln()
+
+    # Data rows
+    for idx, r in enumerate(report['rows']):
+        _ensure_page_space(pdf, 6)
+        fill = idx % 2 == 1
+        pdf.set_fill_color(248, 248, 248)
+        pdf.set_font(ff, '', 7.5)
+        pdf.set_text_color(*COLOR_DARK)
+
+        is_rate = r['metric'] in ('engagementRate', 'bounceRate')
+        cur_str = format_number(r['current'], is_rate)
+        prev_str = format_number(r['previous'], is_rate)
+        pct_str = f"{r['pct']:+.1f}%"
+        impact_str = f"{r['impact']:,.0f}"
+        dim = _safe_text(r['dimension'][:35])
+
+        pct = r['pct']
+        change_color = COLOR_RED if pct < -10 else (COLOR_GREEN if pct > 10 else COLOR_DARK)
+
+        pdf.cell(col_w[0], 5, dim, 0, 0, 'L', fill)
+        pdf.cell(col_w[1], 5, _safe_text(r['metric']), 0, 0, 'L', fill)
+        pdf.cell(col_w[2], 5, _safe_text(cur_str), 0, 0, 'C', fill)
+        pdf.cell(col_w[3], 5, _safe_text(prev_str), 0, 0, 'C', fill)
+
+        pdf.set_text_color(*change_color)
+        pdf.cell(col_w[4], 5, _safe_text(r['change']), 0, 0, 'C', fill)
+        pdf.cell(col_w[5], 5, pct_str, 0, 0, 'C', fill)
+        pdf.set_text_color(*COLOR_GRAY)
+        pdf.cell(col_w[6], 5, impact_str, 0, 0, 'C', fill)
+        pdf.set_text_color(*COLOR_DARK)
+        pdf.ln()
+
+
 def _render_gateway_table(pdf, data, ff):
     """Render payment gateway breakdown table in the PDF."""
     gw_rows = []

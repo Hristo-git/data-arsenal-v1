@@ -213,7 +213,8 @@ def main():
     parser = argparse.ArgumentParser(description='GA4 What-Changed Reports')
     parser.add_argument('property', help='GA4 property ID or name (use "list" to see all)')
     parser.add_argument('--days', type=int, default=7, help='Comparison period (default: 7)')
-    parser.add_argument('--format', choices=['markdown', 'json'], default='markdown')
+    parser.add_argument('--format', choices=['markdown', 'json', 'pdf'], default='markdown')
+    parser.add_argument('--output', help='PDF output path (default: ~/Desktop/)')
     args = parser.parse_args()
 
     creds = require_credentials()
@@ -294,6 +295,12 @@ def main():
     # Output
     if args.format == 'json':
         print(format_json_output(property_name, reports))
+    elif args.format == 'pdf':
+        from _pdf_report import generate_whatchanged_pdf
+        path = generate_whatchanged_pdf(property_name, reports, days=args.days,
+                                        output_path=args.output)
+        print(format_markdown(property_name, reports))
+        print(f"\nPDF saved: {path}", file=sys.stderr)
     else:
         print(format_markdown(property_name, reports))
 
